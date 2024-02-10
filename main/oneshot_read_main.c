@@ -15,8 +15,19 @@
 #include "esp_adc/adc_cali_scheme.h"
 #include "freertos/queue.h"
 #include "driver/gptimer.h"
+#include "esp_task_wdt.h"
 
-const static char *TAG = "EXAMPLE";
+#include "esp_system.h"
+#include "driver/spi_master.h"
+#include "soc/gpio_struct.h"
+#include "driver/gpio.h"
+#include "driver/uart.h"
+#include "soc/uart_struct.h"
+#include <math.h>
+
+#include "esp_dsp.h"
+
+const static char *TAG = "main";
 
 /*---------------------------------------------------------------
         ADC General Macros
@@ -60,8 +71,47 @@ static bool IRAM_ATTR example_timer_on_alarm_cb_v1(gptimer_handle_t timer, const
     return (high_task_awoken == pdTRUE);
 }
 
+/*---------------------------------------------------------------
+        FFT Initialization
+---------------------------------------------------------------*/
+
+#define N_SAMPLES 8192
+int N = N_SAMPLES;
+
+// Window coefficients
+__attribute__((aligned(16)))
+float wind[N_SAMPLES];
+// working complex array
+__attribute__((aligned(16)))
+int fft_spectrum[N_SAMPLES*2];
+// Pointers to result arrays
+float* y1_cf = &fft_spectrum[0];
+float* y2_cf = &fft_spectrum[N_SAMPLES];
+// Sum of y1 and y2
+__attribute__((aligned(16)))
+float sum_y[N_SAMPLES/2];
+
+
+/*---------------------------------------------------------------
+        APP Main
+---------------------------------------------------------------*/
 void app_main(void)
 {
+
+    esp_task_wdt_delete(NULL);
+
+    esp_err_t ret;
+    ESP_LOGI(TAG, "Start Example.");
+    ret = dsps_fft2r_init_sc16(NULL, CONFIG_DSP_MAX_FFT_SIZE);
+    if (ret  != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Not possible to initialize FFT. Error = %i", ret);
+        return;
+    }
+
+    // Generate hann window
+    dsps_wind_hann_f32(wind, N);
+
     //-------------ADC1 Init---------------//
     adc_oneshot_unit_handle_t adc1_handle;
     adc_oneshot_unit_init_cfg_t init_config1 = {
@@ -148,7 +198,8 @@ void app_main(void)
 
                 //Este printf es para sacar el valor, y se puede plotear en un software llamado "Serial Port Plotter v1.3.0"
                 // Enviar los valores por puerto serie necesita muuuucho tiempo, ralentiza el programa.
-                printf("$%d;", um_seg[i]);
+                
+                //printf("$%d;", um_seg[i]);
             }
         }
 
@@ -156,6 +207,53 @@ void app_main(void)
         *   En el array um_seg están los valores de aceleración: 8192, tomados cada uno cada 122useg (total 1 seg)
         *   hacer FFT y enviar. Y ya después empieza el bucle de nuevo. Dale si quieres un pequeño delay
         */
+
+        // FFT
+
+        // convertir vector de entrada a un vector complejo (Re [0] +Im[0]+.... Re[N-1]+Im[N-1]), dejando la parte imaginaria a 0
+        for (int i=0 ; i< N ; i++)
+        {
+            fft_spectrum[i*2 + 0] = um_seg[i] * wind[i];
+            fft_spectrum[i*2 + 1] = 0;
+        }
+
+        //ejecucion fft
+        unsigned int start_b = dsp_get_cpu_cycle_count();
+        dsps_fft2r_sc16(fft_spectrum, N);
+        unsigned int end_b = dsp_get_cpu_cycle_count();
+        // Bit reverse 
+        #ifdef dsps_bit_rev_sc16
+        dsps_bit_rev_sc16(fft_spectrum, N);
+        #else
+        dsps_bit_rev_sc16_ansi(fft_spectrum, N);  
+        #endif
+        // Convert one complex vector to two complex vectors
+        dsps_cplx2reC_sc16(fft_spectrum, N);
+
+        for (int i = 0 ; i < N/2 ; i++) {
+            y1_cf[i] = 10 * log10f((y1_cf[i * 2 + 0] * y1_cf[i * 2 + 0] + y1_cf[i * 2 + 1] * y1_cf[i * 2 + 1])/N);
+            y2_cf[i] = 10 * log10f((y2_cf[i * 2 + 0] * y2_cf[i * 2 + 0] + y2_cf[i * 2 + 1] * y2_cf[i * 2 + 1])/N);
+            // Simple way to show two power spectrums as one plot
+            sum_y[i] = fmax(y1_cf[i], y2_cf[i]);
+        }
+
+        // Show power spectrum in 64x10 window from -100 to 0 dB from 0..N/4 samples
+        
+        ESP_LOGW(TAG, "Signal x1");
+        dsps_view(y1_cf, N/2, 64, 10,  -60, 40, '|');
+        /*
+        ESP_LOGW(TAG, "Signal x2");
+        dsps_view(y2_cf, N/2, 64, 10,  -60, 40, '|');
+        */
+        ESP_LOGW(TAG, "Signals x1 and x2 on one plot");
+        //dsps_view_s16(fft_spectrum, N/2, 128, 20,  -60, 40, '|');
+        for(int i=0; i< N/8; i++){
+              //  printf("$%d;", (int) y1_cf[i]);
+            }
+
+        ESP_LOGI(TAG, "FFT for %i complex points take %i cycles", N, end_b - start_b);
+
+        ESP_LOGI(TAG, "End Example.");
 
         vTaskDelay(1000);
     }
