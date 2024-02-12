@@ -84,9 +84,20 @@ float wind[N_SAMPLES];
 // working complex array
 __attribute__((aligned(16)))
 int fft_spectrum[N_SAMPLES*2];
+// Input test array
+__attribute__((aligned(16)))
+float x1[N_SAMPLES];
+// working complex array
+__attribute__((aligned(16)))
+float y_cf[N_SAMPLES*2];
 // Pointers to result arrays
+/*
 float* y1_cf = &fft_spectrum[0];
 float* y2_cf = &fft_spectrum[N_SAMPLES];
+*/
+float* y1_cf = &y_cf[0];
+float* y2_cf = &y_cf[N_SAMPLES];
+
 // Sum of y1 and y2
 __attribute__((aligned(16)))
 float sum_y[N_SAMPLES/2];
@@ -102,7 +113,8 @@ void app_main(void)
 
     esp_err_t ret;
     ESP_LOGI(TAG, "Start Example.");
-    ret = dsps_fft2r_init_sc16(NULL, CONFIG_DSP_MAX_FFT_SIZE);
+    //ret = dsps_fft2r_init_sc16(NULL, CONFIG_DSP_MAX_FFT_SIZE);
+    ret = dsps_fft2r_init_fc32(NULL, CONFIG_DSP_MAX_FFT_SIZE);
     if (ret  != ESP_OK)
     {
         ESP_LOGE(TAG, "Not possible to initialize FFT. Error = %i", ret);
@@ -111,6 +123,10 @@ void app_main(void)
 
     // Generate hann window
     dsps_wind_hann_f32(wind, N);
+
+    // Generate input signal for x1 A=1 , F=0.1
+    dsps_tone_gen_f32(x1, N, 1.0, 0.122,  0);
+    
 
     //-------------ADC1 Init---------------//
     adc_oneshot_unit_handle_t adc1_handle;
@@ -209,14 +225,23 @@ void app_main(void)
         */
 
         // FFT
-
+        
+        
         // convertir vector de entrada a un vector complejo (Re [0] +Im[0]+.... Re[N-1]+Im[N-1]), dejando la parte imaginaria a 0
+        /*for (int i=0 ; i< N ; i++)
+        {
+            //fft_spectrum[i*2 + 0] = um_seg[i] * wind[i];
+            fft_spectrum[i*2 + 0] = um_seg[i];
+            fft_spectrum[i*2 + 1] = 0;
+        }*/
+
+        // Convert two input vectors to one complex vector
         for (int i=0 ; i< N ; i++)
         {
-            fft_spectrum[i*2 + 0] = um_seg[i] * wind[i];
-            fft_spectrum[i*2 + 1] = 0;
+            y_cf[i*2 + 0] = um_seg[i] * wind[i];
+            y_cf[i*2 + 1] = 0;
         }
-
+/*
         //ejecucion fft
         unsigned int start_b = dsp_get_cpu_cycle_count();
         dsps_fft2r_sc16(fft_spectrum, N);
@@ -230,28 +255,53 @@ void app_main(void)
         // Convert one complex vector to two complex vectors
         dsps_cplx2reC_sc16(fft_spectrum, N);
 
+        // y1_cf - is your result in log scale
+        // y2_cf - magnitude of your signal in linear scale
+
         for (int i = 0 ; i < N/2 ; i++) {
             y1_cf[i] = 10 * log10f((y1_cf[i * 2 + 0] * y1_cf[i * 2 + 0] + y1_cf[i * 2 + 1] * y1_cf[i * 2 + 1])/N);
-            y2_cf[i] = 10 * log10f((y2_cf[i * 2 + 0] * y2_cf[i * 2 + 0] + y2_cf[i * 2 + 1] * y2_cf[i * 2 + 1])/N);
-            // Simple way to show two power spectrums as one plot
-            sum_y[i] = fmax(y1_cf[i], y2_cf[i]);
+            y2_cf[i] = ((y1_cf[i * 2 + 0] * y1_cf[i * 2 + 0] + y1_cf[i * 2 + 1] * y1_cf[i * 2 + 1])/N);
         }
+*/
+
+    // FFT
+    ESP_LOGI(TAG, "Ejecutando FFT");
+    unsigned int start_b = dsp_get_cpu_cycle_count();
+    dsps_fft2r_fc32(y_cf, N);
+    unsigned int end_b = dsp_get_cpu_cycle_count();
+    ESP_LOGI(TAG, "FFT for %i complex points take %i cycles", N, end_b - start_b);
+
+    // Bit reverse 
+    dsps_bit_rev_fc32(y_cf, N);
+    ESP_LOGI(TAG, "Bit reversed");
+    // Convert one complex vector to two complex vectors
+    dsps_cplx2reC_fc32(y_cf, N);
+    ESP_LOGI(TAG, "Complex to Real vectors Done");
+
+    for (int i = 0 ; i < N/2 ; i++) {
+        y1_cf[i] = 10 * log10f((y_cf[i * 2 + 0] * y_cf[i * 2 + 0] )/N);
+        y2_cf[i] = sqrt((y_cf[i * 2 + 0] * y_cf[i * 2 + 0] )/N);
+        // Simple way to show two power spectrums as one plot
+    }
 
         // Show power spectrum in 64x10 window from -100 to 0 dB from 0..N/4 samples
-        
-        ESP_LOGW(TAG, "Signal x1");
-        dsps_view(y1_cf, N/2, 64, 10,  -60, 40, '|');
+    ESP_LOGW(TAG, "Signal x1");
+    dsps_view(y_cf, N/2, 128, 20,  -60, 40, '|');
+    ESP_LOGW(TAG, "Signal x2");
+    dsps_view(y2_cf, N/2, 128, 20,  -60, 40, '|');
         /*
-        ESP_LOGW(TAG, "Signal x2");
-        dsps_view(y2_cf, N/2, 64, 10,  -60, 40, '|');
-        */
-        ESP_LOGW(TAG, "Signals x1 and x2 on one plot");
-        //dsps_view_s16(fft_spectrum, N/2, 128, 20,  -60, 40, '|');
-        for(int i=0; i< N/8; i++){
-              //  printf("$%d;", (int) y1_cf[i]);
+        // Show power spectrum in 64x10 window from -60 to 0 dB from 0..N/2 samples
+        ESP_LOGW(TAG, "Signal x1 in log scale");
+        dsps_view(y1_cf, N/2, 64, 10,  -60, 40, '|');
+        ESP_LOGW(TAG, "Signal x1 in absolute scale");
+        dsps_view(y2_cf, N/2, 64, 10,  0, 2, '|');
+*/
+
+        for(int i=0; i< N/4; i++){
+                printf("$%d;", (int) y1_cf[i]);
             }
 
-        ESP_LOGI(TAG, "FFT for %i complex points take %i cycles", N, end_b - start_b);
+        
 
         ESP_LOGI(TAG, "End Example.");
 
